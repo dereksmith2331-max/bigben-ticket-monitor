@@ -2,13 +2,10 @@ name: Big Ben Ticket Monitor
 
 on:
   schedule:
-    # EDT = UTC-4 (summer). Aug 4-6 is in EDT.
     - cron: "0 6 * * *"    # 02:00 EDT
     - cron: "0 12 * * *"   # 08:00 EDT
     - cron: "0 18 * * *"   # 14:00 EDT
     - cron: "0 0 * * *"    # 20:00 EDT
-
-  # Manual trigger from the Actions tab for testing
   workflow_dispatch:
 
 jobs:
@@ -60,12 +57,7 @@ jobs:
         id: result
         run: |
           if [ -f availability_result.json ]; then
-            DATES=$(python -c "
-import json
-with open('availability_result.json') as f:
-    data = json.load(f)
-print(', '.join(data['available_dates']))
-            ")
+            DATES=$(python -c "import json,sys; d=json.load(open('availability_result.json')); print(', '.join(d['available_dates']))")
             echo "dates=$DATES" >> $GITHUB_OUTPUT
             echo "found=true" >> $GITHUB_OUTPUT
           else
@@ -81,15 +73,12 @@ print(', '.join(data['available_dates']))
           script: |
             const dates = "${{ steps.result.outputs.dates }}";
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-
-            // Check for an existing open alert issue to avoid inbox spam
             const issues = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
               repo: context.repo.repo,
               state: 'open',
               labels: 'ticket-alert',
             });
-
             if (issues.data.length > 0) {
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
