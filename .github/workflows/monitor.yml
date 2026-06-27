@@ -2,32 +2,23 @@ name: Big Ben Ticket Monitor
 
 on:
   schedule:
-    # All times are UTC. Eastern time offsets:
-    #   EDT (summer, UTC-4): 02:00, 08:00, 14:00, 20:00 ET = 06:00, 12:00, 18:00, 00:00 UTC
-    #   EST (winter, UTC-5): add one hour to each
-    # Aug 4-6 falls in EDT (UTC-4), so these cron entries are correct for summer.
+    # EDT = UTC-4 (summer). Aug 4-6 is in EDT.
     - cron: "0 6 * * *"    # 02:00 EDT
     - cron: "0 12 * * *"   # 08:00 EDT
     - cron: "0 18 * * *"   # 14:00 EDT
     - cron: "0 0 * * *"    # 20:00 EDT
 
-  # Allow manual trigger from the Actions tab for testing
+  # Manual trigger from the Actions tab for testing
   workflow_dispatch:
 
 jobs:
   check-availability:
     runs-on: ubuntu-latest
-    # Stop running after August 6 2026 to avoid wasted runs
-    # GitHub doesn't support date-based job conditions natively,
-    # so we check the date inside the job steps below.
 
     permissions:
-      issues: write   # needed to create the alert issue
+      issues: write
 
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4.2.2
-
       - name: Check if monitoring window has passed
         id: date_check
         run: |
@@ -40,6 +31,10 @@ jobs:
             echo "expired=false" >> $GITHUB_OUTPUT
             echo "Within monitoring window (today: $TODAY). Proceeding."
           fi
+
+      - name: Check out repository
+        if: steps.date_check.outputs.expired == 'false'
+        uses: actions/checkout@v4.2.2
 
       - name: Set up Python
         if: steps.date_check.outputs.expired == 'false'
@@ -57,33 +52,19 @@ jobs:
       - name: Run ticket checker
         if: steps.date_check.outputs.expired == 'false'
         id: checker
-        run: |
-          python check_tickets.py
-          echo "exit_code=$?" >> $GITHUB_OUTPUT
-        # Continue even if the script exits with code 1 (no availability)
-        # so the next steps can handle the result correctly.
+        run: python check_tickets.py
         continue-on-error: true
 
-      - name: Upload debug HTML
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: page-debug
-          path: page_debug.html
-          retention-days: 1
-     
       - name: Read availability result
-        if: |
-          steps.date_check.outputs.expired == 'false' &&
-          steps.checker.outcome == 'success'
+        if: steps.date_check.outputs.expired == 'false'
         id: result
         run: |
           if [ -f availability_result.json ]; then
             DATES=$(python -c "
-          import json
-          with open('availability_result.json') as f:
-              data = json.load(f)
-          print(', '.join(data['available_dates']))
+import json
+with open('availability_result.json') as f:
+    data = json.load(f)
+print(', '.join(data['available_dates']))
             ")
             echo "dates=$DATES" >> $GITHUB_OUTPUT
             echo "found=true" >> $GITHUB_OUTPUT
@@ -91,7 +72,7 @@ jobs:
             echo "found=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Open GitHub Issue alert
+      - name: Open or update GitHub Issue alert
         if: |
           steps.date_check.outputs.expired == 'false' &&
           steps.result.outputs.found == 'true'
@@ -101,7 +82,7 @@ jobs:
             const dates = "${{ steps.result.outputs.dates }}";
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
 
-            // Check if an open alert issue already exists to avoid spam
+            // Check for an existing open alert issue to avoid inbox spam
             const issues = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -110,7 +91,6 @@ jobs:
             });
 
             if (issues.data.length > 0) {
-              // Add a comment to the existing issue instead of opening a new one
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
@@ -119,7 +99,6 @@ jobs:
               });
               console.log(`Updated existing issue #${issues.data[0].number}`);
             } else {
-              // Open a fresh alert issue
               const issue = await github.rest.issues.create({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
@@ -148,8 +127,7 @@ jobs:
           steps.date_check.outputs.expired == 'false' &&
           steps.result.outputs.found != 'true' &&
           steps.checker.outcome != 'failure'
-        run: |
-          echo "No availability found for August 4, 5, or 6. No action taken."
+        run: echo "No availability found for August 4, 5, or 6. No action taken."
 
       - name: Log script error
         if: |
@@ -157,5 +135,4 @@ jobs:
           steps.checker.outcome == 'failure'
         run: |
           echo "WARNING: The ticket checker script encountered an error."
-          echo "Check the logs above. This may be a temporary site issue."
-          echo "No alert will be sent for a script error."
+          echo "Check the logs above. This may be a transient site issue."
