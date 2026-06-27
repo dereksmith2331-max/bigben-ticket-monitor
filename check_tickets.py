@@ -17,13 +17,6 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 
 URL = "https://tickets.parliament.uk/timeslot/big-ben-tour"
 
-# aria-label values on the date buttons match "4 August 2026" format
-TARGET_ARIA_LABELS = [
-    "4 August 2026",
-    "5 August 2026",
-    "6 August 2026",
-]
-
 
 def log(msg: str) -> None:
     timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -84,40 +77,66 @@ def navigate_to_august(page) -> bool:
 
 def find_available_dates(page) -> list[str]:
     """
-    Returns a list of target date labels that are available.
+    Returns a list of target date strings that are available.
 
-    A date button is available when:
-      - Its aria-label matches one of our target dates, AND
-      - It does NOT have the 'unavailableDay' class, AND
-      - It does NOT have the 'disabled' attribute.
+    Strategy: collect all calendar day buttons that are currently
+    rendered, log every one so we can see the exact aria-label format,
+    then match our target days (4, 5, 6) against whatever format is
+    actually present.
+
+    A date is available when its button lacks both the 'disabled'
+    attribute and the 'unavailableDay' class.
     """
     available = []
+    target_days = {4, 5, 6}
 
-    for label in TARGET_ARIA_LABELS:
+    # Grab every button inside the calendar day grid
+    all_buttons = page.locator(
+        ".react-calendar__month-view__days button.react-calendar__tile"
+    )
+    count = all_buttons.count()
+    log(f"Found {count} calendar day buttons in August view.")
+
+    for i in range(count):
+        btn = all_buttons.nth(i)
         try:
-            # Select the button with this exact aria-label
-            btn = page.locator(f"button[aria-label='{label}']").first
-            btn.wait_for(state="attached", timeout=5000)
-
-            # Check disabled attribute
-            is_disabled = btn.get_attribute("disabled")
-            if is_disabled is not None:
-                log(f"{label}: disabled attribute present -- unavailable")
-                continue
-
-            # Check for unavailableDay class
+            aria = btn.get_attribute("aria-label") or ""
             class_attr = btn.get_attribute("class") or ""
-            if "unavailableDay" in class_attr:
-                log(f"{label}: has unavailableDay class -- unavailable")
-                continue
-
-            log(f"{label}: AVAILABLE (no disabled attribute, no unavailableDay class)")
-            available.append(label)
-
-        except PlaywrightTimeout:
-            log(f"{label}: button not found in time -- treating as unavailable")
+            is_disabled = btn.get_attribute("disabled")
+            # Log every button so we can see the real aria-label format
+            log(f"  Button {i}: aria-label='{aria}' disabled={is_disabled is not None} classes='{class_attr}'")
         except Exception as e:
-            log(f"{label}: error checking -- {e}")
+            log(f"  Button {i}: error reading attributes -- {e}")
+            continue
+
+        # Match target days: aria-label contains the day number and
+        # some form of "August" -- handles formats like:
+        #   "4 August 2026", "Wednesday, 4 August 2026", "Aug 4, 2026", etc.
+        matched_day = None
+        for day in target_days:
+            if str(day) in aria and "August" in aria:
+                matched_day = day
+                break
+            # Also handle abbreviated or numeric month formats just in case
+            if str(day) in aria and "Aug" in aria:
+                matched_day = day
+                break
+
+        if matched_day is None:
+            continue
+
+        # Found a target day -- check availability
+        is_disabled = btn.get_attribute("disabled")
+        if is_disabled is not None:
+            log(f"August {matched_day}: disabled -- unavailable")
+            continue
+
+        if "unavailableDay" in class_attr:
+            log(f"August {matched_day}: unavailableDay class -- unavailable")
+            continue
+
+        log(f"August {matched_day}: AVAILABLE")
+        available.append(f"{matched_day} August 2026")
 
     return available
 
