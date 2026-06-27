@@ -43,7 +43,7 @@ jobs:
 
       - name: Set up Python
         if: steps.date_check.outputs.expired == 'false'
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v5.6.0
         with:
           python-version: "3.12"
 
@@ -87,7 +87,7 @@ jobs:
         if: |
           steps.date_check.outputs.expired == 'false' &&
           steps.result.outputs.found == 'true'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v7.0.1
         with:
           script: |
             const dates = "${{ steps.result.outputs.dates }}";
