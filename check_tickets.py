@@ -1,7 +1,8 @@
 """
 Big Ben Tour ticket availability checker.
-Navigates to the Parliament ticketing page, advances to August 2026,
-and checks whether Aug 4, 5, or 6 have available (non-greyed-out) slots.
+Navigates to the Parliament ticketing page, clicks the August 2026
+month block in the carousel, then checks whether Aug 4, 5, or 6
+have available (non-disabled, non-unavailableDay) slots.
 
 Exit codes:
   0 -- one or more target dates are available
@@ -15,9 +16,13 @@ from datetime import datetime
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 
 URL = "https://tickets.parliament.uk/timeslot/big-ben-tour"
-TARGET_DATES = [4, 5, 6]   # August days to check
-TARGET_MONTH = "August"
-TARGET_YEAR = "2026"
+
+# aria-label values on the date buttons match "4 August 2026" format
+TARGET_ARIA_LABELS = [
+    "4 August 2026",
+    "5 August 2026",
+    "6 August 2026",
+]
 
 
 def log(msg: str) -> None:
@@ -25,138 +30,80 @@ def log(msg: str) -> None:
     print(f"[{timestamp}] {msg}", flush=True)
 
 
-def find_available_dates(page) -> list[int]:
+def navigate_to_august(page) -> bool:
     """
-    Returns a list of target day numbers that appear available on the calendar.
-    A date is considered available if it has a clickable/active day cell
-    and is NOT greyed out / disabled.
+    Clicks the 'August' month block in the Alice Carousel to load
+    the August calendar. Returns True on success.
+    """
+    log("Looking for August 2026 carousel block...")
+
+    # The carousel renders month blocks as divs containing two child divs:
+    # one with the month name text and one with the year.
+    # We find the wrapper block whose text contains both "August" and "2026".
+    try:
+        august_block = page.locator(
+            ".time-slot-month__block",
+        ).filter(has_text="August").filter(has_text="2026").first
+
+        august_block.wait_for(state="visible", timeout=10000)
+        august_block.click()
+        log("Clicked August 2026 block.")
+
+        # Wait for the calendar to re-render with August dates.
+        # We wait for a button with aria-label containing "August 2026" to appear.
+        page.wait_for_selector(
+            "button[aria-label*='August 2026']",
+            timeout=10000,
+        )
+        log("August calendar rendered.")
+        return True
+
+    except PlaywrightTimeout:
+        log("ERROR: Timed out waiting for August calendar to render.")
+        return False
+    except Exception as e:
+        log(f"ERROR: Failed to navigate to August -- {e}")
+        return False
+
+
+def find_available_dates(page) -> list[str]:
+    """
+    Returns a list of target date labels that are available.
+
+    A date button is available when:
+      - Its aria-label matches one of our target dates, AND
+      - It does NOT have the 'unavailableDay' class, AND
+      - It does NOT have the 'disabled' attribute.
     """
     available = []
 
-    for day in TARGET_DATES:
-        # Playwright locator strategy:
-        # The SEE Tickets calendar renders each date as a button or div
-        # with the day number as text. Disabled/unavailable dates typically
-        # carry an aria-disabled attribute or a CSS class like 'disabled',
-        # 'unavailable', or 'greyed'. We try multiple selector patterns.
+    for label in TARGET_ARIA_LABELS:
+        try:
+            # Select the button with this exact aria-label
+            btn = page.locator(f"button[aria-label='{label}']").first
+            btn.wait_for(state="attached", timeout=5000)
 
-        # Try to find any element containing the day number that is NOT disabled.
-        # We look for elements with the exact text of the day number.
-        day_str = str(day)
-
-        # Primary: look for a button/td/div with day text that lacks disabled markers
-        candidates = page.locator(
-            f"button:not([disabled]):not(.disabled):not(.unavailable), "
-            f"td:not(.disabled):not(.unavailable):not(.greyed), "
-            f"div:not(.disabled):not(.unavailable):not(.greyed)"
-        ).filter(has_text=day_str)
-
-        count = candidates.count()
-        found = False
-
-        for i in range(count):
-            el = candidates.nth(i)
-            try:
-                text = el.inner_text().strip()
-                # Exact match only -- avoid matching "14" when looking for "4"
-                if text != day_str:
-                    continue
-
-                # Check aria-disabled
-                aria_disabled = el.get_attribute("aria-disabled")
-                if aria_disabled == "true":
-                    continue
-
-                # Check class for common disabled patterns
-                class_attr = el.get_attribute("class") or ""
-                disabled_classes = {"disabled", "unavailable", "greyed", "inactive",
-                                    "sold-out", "soldout", "closed"}
-                if any(c in class_attr.lower() for c in disabled_classes):
-                    continue
-
-                # Passed all checks -- treat as available
-                found = True
-                break
-
-            except Exception:
+            # Check disabled attribute
+            is_disabled = btn.get_attribute("disabled")
+            if is_disabled is not None:
+                log(f"{label}: disabled attribute present -- unavailable")
                 continue
 
-        if found:
-            log(f"August {day} appears AVAILABLE")
-            available.append(day)
-        else:
-            log(f"August {day} appears unavailable or greyed out")
+            # Check for unavailableDay class
+            class_attr = btn.get_attribute("class") or ""
+            if "unavailableDay" in class_attr:
+                log(f"{label}: has unavailableDay class -- unavailable")
+                continue
+
+            log(f"{label}: AVAILABLE (no disabled attribute, no unavailableDay class)")
+            available.append(label)
+
+        except PlaywrightTimeout:
+            log(f"{label}: button not found in time -- treating as unavailable")
+        except Exception as e:
+            log(f"{label}: error checking -- {e}")
 
     return available
-
-
-def navigate_to_august(page) -> bool:
-    """
-    Clicks the calendar's 'next month' control until August 2026 is displayed.
-    Returns True on success, False if navigation fails.
-    """
-    max_clicks = 6  # safety limit -- we should never need more than 2 from July
-
-    for attempt in range(max_clicks):
-        # Check what month/year is currently displayed
-        # SEE Tickets typically renders the month header in an element like
-        # h2, .month-title, .calendar-header, or similar
-        header_selectors = [
-            ".month-title",
-            ".calendar-header",
-            ".datepicker-switch",
-            "[class*='month']",
-            "h2",
-            "h3",
-        ]
-
-        current_header = ""
-        for sel in header_selectors:
-            try:
-                el = page.locator(sel).first
-                if el.is_visible(timeout=2000):
-                    current_header = el.inner_text().strip()
-                    break
-            except Exception:
-                continue
-
-        log(f"Calendar header reads: '{current_header}'")
-
-        if TARGET_MONTH in current_header and TARGET_YEAR in current_header:
-            log("August 2026 is now displayed.")
-            return True
-
-        # Click the next-month arrow
-        next_selectors = [
-            "button[aria-label*='next' i]",
-            "button[aria-label*='forward' i]",
-            ".next-month",
-            ".next",
-            "[class*='next']",
-            "button:has-text('>')",
-            "button:has-text('›')",
-            "button:has-text('→')",
-        ]
-
-        clicked = False
-        for sel in next_selectors:
-            try:
-                btn = page.locator(sel).first
-                if btn.is_visible(timeout=2000):
-                    btn.click()
-                    page.wait_for_timeout(1200)  # wait for calendar to re-render
-                    clicked = True
-                    log(f"Clicked next-month button (attempt {attempt + 1})")
-                    break
-            except Exception:
-                continue
-
-        if not clicked:
-            log("ERROR: Could not find a next-month button to click.")
-            return False
-
-    log(f"ERROR: Reached August navigation limit ({max_clicks} clicks) without finding August 2026.")
-    return False
 
 
 def main() -> int:
@@ -187,36 +134,28 @@ def main() -> int:
             browser.close()
             return 2
 
-        # Wait a moment for JS calendar to initialise
-        page.wait_for_timeout(3000)
+        # Wait for the carousel to render
+        try:
+            page.wait_for_selector(".time-slot-month__block", timeout=15000)
+            log("Carousel detected.")
+        except PlaywrightTimeout:
+            log("ERROR: Carousel did not appear -- page may not have rendered correctly.")
+            browser.close()
+            return 2
 
-        # DEBUG: dump rendered HTML so we can identify correct selectors
-        with open("page_debug.html", "w") as f:
-            f.write(page.content())
-        print("DEBUG: page_debug.html written", flush=True)
-
-        # Navigate to August 2026
+        # Navigate to August
         if not navigate_to_august(page):
-            # Dump page text for debugging
-            log("Page text snippet for debugging:")
-            try:
-                print(page.inner_text("body")[:2000])
-            except Exception:
-                pass
             browser.close()
             return 2
 
         # Check target dates
         available = find_available_dates(page)
-
         browser.close()
 
     if available:
-        days_str = ", ".join(f"August {d}" for d in available)
-        log(f"AVAILABILITY FOUND: {days_str}")
-        # Write a summary file that the GitHub Actions step reads
+        log(f"AVAILABILITY FOUND: {', '.join(available)}")
         result = {
-            "available_dates": [f"August {d}, 2026" for d in available],
+            "available_dates": available,
             "url": URL,
             "checked_at": datetime.utcnow().isoformat() + "Z",
         }
