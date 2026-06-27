@@ -190,6 +190,11 @@ def main() -> int:
         # Wait a moment for JS calendar to initialise
         page.wait_for_timeout(3000)
 
+        # DEBUG: dump rendered HTML so we can identify correct selectors
+        with open("page_debug.html", "w") as f:
+            f.write(page.content())
+        print("DEBUG: page_debug.html written", flush=True)
+
         # Navigate to August 2026
         if not navigate_to_august(page):
             # Dump page text for debugging
