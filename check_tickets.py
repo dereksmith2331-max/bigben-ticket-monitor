@@ -37,24 +37,40 @@ def navigate_to_august(page) -> bool:
     """
     log("Looking for August 2026 carousel block...")
 
-    # The carousel renders month blocks as divs containing two child divs:
-    # one with the month name text and one with the year.
-    # We find the wrapper block whose text contains both "August" and "2026".
     try:
         august_block = page.locator(
             ".time-slot-month__block",
         ).filter(has_text="August").filter(has_text="2026").first
 
-        august_block.wait_for(state="visible", timeout=10000)
+        august_block.wait_for(state="visible", timeout=15000)
         august_block.click()
         log("Clicked August 2026 block.")
 
-        # Wait for the calendar to re-render with August dates.
-        # We wait for a button with aria-label containing "August 2026" to appear.
+        # Give the page a moment to fire its API request after the click
+        page.wait_for_timeout(4000)
+
+        # Wait for the calendar label to update to August.
+        # The navigation label span shows the current month name.
         page.wait_for_selector(
-            "button[aria-label*='August 2026']",
-            timeout=10000,
+            ".react-calendar__navigation__label__labelText",
+            timeout=20000,
         )
+
+        # Confirm the label actually says August
+        label_text = page.locator(
+            ".react-calendar__navigation__label__labelText"
+        ).first.inner_text()
+        log(f"Calendar label now reads: '{label_text}'")
+
+        if "August" not in label_text:
+            # Label didn't update -- try waiting a bit longer for the
+            # aria-label buttons as a fallback signal
+            log("Label not yet August, waiting for August date buttons...")
+            page.wait_for_selector(
+                "button[aria-label*='August 2026']",
+                timeout=15000,
+            )
+
         log("August calendar rendered.")
         return True
 
@@ -134,9 +150,12 @@ def main() -> int:
             browser.close()
             return 2
 
+        # Give the JS app a moment to fully initialise before we interact
+        page.wait_for_timeout(5000)
+
         # Wait for the carousel to render
         try:
-            page.wait_for_selector(".time-slot-month__block", timeout=15000)
+            page.wait_for_selector(".time-slot-month__block", timeout=20000)
             log("Carousel detected.")
         except PlaywrightTimeout:
             log("ERROR: Carousel did not appear -- page may not have rendered correctly.")
