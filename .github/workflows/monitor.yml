@@ -1,0 +1,153 @@
+name: Big Ben Ticket Monitor
+
+on:
+  schedule:
+    # All times are UTC. Eastern time offsets:
+    #   EDT (summer, UTC-4): 02:00, 08:00, 14:00, 20:00 ET = 06:00, 12:00, 18:00, 00:00 UTC
+    #   EST (winter, UTC-5): add one hour to each
+    # Aug 4-6 falls in EDT (UTC-4), so these cron entries are correct for summer.
+    - cron: "0 6 * * *"    # 02:00 EDT
+    - cron: "0 12 * * *"   # 08:00 EDT
+    - cron: "0 18 * * *"   # 14:00 EDT
+    - cron: "0 0 * * *"    # 20:00 EDT
+
+  # Allow manual trigger from the Actions tab for testing
+  workflow_dispatch:
+
+jobs:
+  check-availability:
+    runs-on: ubuntu-latest
+    # Stop running after August 6 2026 to avoid wasted runs
+    # GitHub doesn't support date-based job conditions natively,
+    # so we check the date inside the job steps below.
+
+    permissions:
+      issues: write   # needed to create the alert issue
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Check if monitoring window has passed
+        id: date_check
+        run: |
+          TODAY=$(date -u +%Y%m%d)
+          DEADLINE=20260807
+          if [ "$TODAY" -gt "$DEADLINE" ]; then
+            echo "expired=true" >> $GITHUB_OUTPUT
+            echo "Monitoring window has passed (today: $TODAY). Skipping."
+          else
+            echo "expired=false" >> $GITHUB_OUTPUT
+            echo "Within monitoring window (today: $TODAY). Proceeding."
+          fi
+
+      - name: Set up Python
+        if: steps.date_check.outputs.expired == 'false'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        if: steps.date_check.outputs.expired == 'false'
+        run: |
+          pip install playwright
+          playwright install chromium
+          playwright install-deps chromium
+
+      - name: Run ticket checker
+        if: steps.date_check.outputs.expired == 'false'
+        id: checker
+        run: |
+          python check_tickets.py
+          echo "exit_code=$?" >> $GITHUB_OUTPUT
+        # Continue even if the script exits with code 1 (no availability)
+        # so the next steps can handle the result correctly.
+        continue-on-error: true
+
+      - name: Read availability result
+        if: |
+          steps.date_check.outputs.expired == 'false' &&
+          steps.checker.outcome == 'success'
+        id: result
+        run: |
+          if [ -f availability_result.json ]; then
+            DATES=$(python -c "
+          import json
+          with open('availability_result.json') as f:
+              data = json.load(f)
+          print(', '.join(data['available_dates']))
+            ")
+            echo "dates=$DATES" >> $GITHUB_OUTPUT
+            echo "found=true" >> $GITHUB_OUTPUT
+          else
+            echo "found=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Open GitHub Issue alert
+        if: |
+          steps.date_check.outputs.expired == 'false' &&
+          steps.result.outputs.found == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const dates = "${{ steps.result.outputs.dates }}";
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+
+            // Check if an open alert issue already exists to avoid spam
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'ticket-alert',
+            });
+
+            if (issues.data.length > 0) {
+              // Add a comment to the existing issue instead of opening a new one
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issues.data[0].number,
+                body: `**Still available** as of ${new Date().toUTCString()}\n\nDates: ${dates}\n\n[View run](${runUrl})`,
+              });
+              console.log(`Updated existing issue #${issues.data[0].number}`);
+            } else {
+              // Open a fresh alert issue
+              const issue = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: `🔔 Big Ben tickets available: ${dates}`,
+                labels: ['ticket-alert'],
+                body: [
+                  '## Big Ben Tour tickets are available!',
+                  '',
+                  `**Available dates:** ${dates}`,
+                  '',
+                  '**Book now:** https://tickets.parliament.uk/timeslot/big-ben-tour',
+                  '',
+                  `**Detected at:** ${new Date().toUTCString()}`,
+                  '',
+                  `[View check run](${runUrl})`,
+                  '',
+                  '---',
+                  '_Close this issue once you have booked or confirmed availability is gone._',
+                ].join('\n'),
+              });
+              console.log(`Opened new alert issue #${issue.data.number}`);
+            }
+
+      - name: Log no-availability result
+        if: |
+          steps.date_check.outputs.expired == 'false' &&
+          steps.result.outputs.found != 'true' &&
+          steps.checker.outcome != 'failure'
+        run: |
+          echo "No availability found for August 4, 5, or 6. No action taken."
+
+      - name: Log script error
+        if: |
+          steps.date_check.outputs.expired == 'false' &&
+          steps.checker.outcome == 'failure'
+        run: |
+          echo "WARNING: The ticket checker script encountered an error."
+          echo "Check the logs above. This may be a temporary site issue."
+          echo "No alert will be sent for a script error."
